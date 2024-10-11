@@ -1,0 +1,202 @@
+int-lenet INDEX
+
+MNIST = Array of 10000... Images FROM test side
+INDEX -> MNIST[]
+
+
+int-lenet 0  ==> Take the image 1 from MNIST dataset and pass it to int-lenet program to predict the digit on the image
+int-lenet 14  ==> Take the image 15 from MNIST dataset and pass it to int-lenet program to predict the digit on the image
+
+What we've done?
+
+- Modified int-lenet to accept one more parameter
+
+int-lenet INDEX NUMBER_OF_INJECTIONS
+
+INDEX is the same
+NUMBER_OF_INJECTIONS is the amount of bit-flips to insert into the model parameters
+We insert bit-flips absolutely randomly accorss the parameters for the model. We do it by choosing random set of parameters for layer:
+
+We work with following parameters: C1_kernels, C3_kernels, F5_weights, F6_weights, F7_weights
+Each parameters are corresponing to the concrete layer, e.g. C1 is a layer for C1_kernels
+
+We can also work with biasses, it's just was omitted by Claude
+
+The parameters are just set of number
+- We choose a layer from the set of parameters above
+- We choose a value (aka weight) from the parameters in that layer
+
+For example if we have chosen (randomly) the layer C1, we:
+- Take the parameters for C1 = C1_kernels
+C1_kernels looks something like [0, 1, 125, -56, ..., -1]
+- We choose random value in C1_kernels, e.g. 125
+- We flip random bit in this value
+
+---------------------
+
+Then we can test the program's behaviour, for instance:
+
+int-lenet 0 0 ==> Gives us the prediction for image 1 and injects 0 bit flips
+int-lenet 0 10 ==> Gives us the prediction for image 1 and injects 10 bit flips
+int-lenet 122 1000 ==> Gives us the prediction for image 123 and injects 1000 bit flips
+
+---------------------
+
+Why we did that in the same model code? (int-lenet.c)
+
+Firstly, let's consider an approach where don't touch the original code from professor. As far as i understood the workflow initially was like this:
+- We train the LeNet-5 architecture model in python using tensorflow (for convinence)
+- We save the model to reuse
+- We use tensorflow.lite to optimize our model for the embedded systems
+- We optimize it using quantization to int8, as well as to float as second example (We are focusing on int8 testing workflow for now)
+- On the other hand we have int-lenet.c file. Which is implementation of the same LeNet-5 architecture, but in C. It is logical because C is faster and more optimized for embedded system constraints
+- BUT, the problem using C is it is very very very hard and uncomfortable, also slow in terms of productivity to train the model
+- SO we splitted the training and actual usage (aka inference) between Python and C
+- OKAY, here is another problem. The format the model is saved
+    - Note that model saving mostly means to save parameters that we calculated in the training (weights) so we can reuse them, it is whole value of the any neural network model. Architecture can be easily replciated, but the weights are usually time consumive and expensive to calculate. (In our case training lenet and mnist is old age so it is fast, but imagine multi billions of paramters of the ChatGPT. Also just know that basically the architecture of ChatGPT is public, but their advantage (OpenAI) is in their dataset and resources they have to train the model, it costs like few million dollars at least and takes like a month to train it (numbers are out of head but somewhat true))
+- Back to the problem, the format the model is saved in is not suitable for the C code, professor notes it in the comments and readme and somewhere around too, i just forgot. So he wrote few scripts in python to convert the tensorflow.lite model format (you can see them in lenet5_models folder: model_float.tflite or model_int8_t.tflite) (.h5 is default tensorflow model with no quantization).
+- He did it in weird, but maybe justified way, i am not expert in ai or C, sorry :3. Because he generates C code (int_8_images.c for dataset, int8_parameters.h for weights) from the tensorflow.lite model.
+- In C code he manually wrote all the math for the LeNet-5 model and imports dataset and weights from the generated C files and uses them
+- The usage of the original program is described above
+- There wasn't any script for evaluating int8 model accuracy. There is a script accuracy.sh but it is for the float models only and it is very very very slow
+
+
+If we wouldn't modify the original code, we would probally need to modify dump-parameters.py code so while we are transforming the weights to C we would randomly leave fault injections in values for the weights. But you can imagine how hard it would be:
+- Train model initially
+- Run dump-images.py
+- Run dump-parameters.py 
+- Compile int-lenet
+- Run int-lenet for the whole dataset (0 to 10000...)
+- Run dump-parameters.py with 1 injection (for instance)
+- Compile int-lenet
+- Run int-lenet
+- Run int-lenet for the whole dataset (0 to 10000...)
+- Run dump-parameters.py with 2 injections (for instance)
+- Compile int-lenet
+- Run int-lenet
+- Run int-lenet for the whole dataset (0 to 10000...)
+- ...
+You can see it is really slow and would nightmare to automate
+
+
+SOOO, to solve it we just implement injections straight in the int-lenet, so we can compile it one time and run as much as we want after:
+- Train model initially
+- Run dump-images.py
+- Run dump-parameters.py 
+- Compile int-lenet
+- Run int-lenet for the whole dataset (0 to 10000...) with 0 injections
+- Run int-lenet for the whole dataset (0 to 10000...) with 1 injection
+- Run int-lenet for the whole dataset (0 to 10000...) with 2 injections
+- ...
+
+NOTE: practically you most likely need to be able to also choose the layer to insert fault injections to, or activation values (which are not implemented by the way, as far as i know)
+activation values are the values that are transferred between layers (intermediate)
+
+- As you should remember neural network is set of layers of neurons
+- Neurons comminicate with each other sending values
+- Imagine if real fault injection would happen to the value that one neuron is sending another one
+- The next neuron would get the incorrect value to work with
+- So it is also should be considered and implemented i guess
+
+
+The code we modified is described at the beginning
+
+SO WHAT'S NEXT?
+
+We can test the model manually, as described at the begining, but to actually measure somewhat usable performance we should automate it.
+Even though we simplified the workflow with the model, if we want to collection information about models' performance when we inject from 0 to 50 bit flips it will take
+10000*50=5000000 computations, and 50 injections is not really a critical stress test it should be like a 100 i think (mostly so it would look cool in the graphs)
+
+So initial idea was to make simple shell script to iteratively calculate the predictions for each image with injectsion for each image from 0 to 50
+
+BUT i just said it is slow
+
+To make it faster we need to parrrelize it. 
+
+Parrelization is just making so the computations are done simulatensoly, for example:
+
+We want to calculate (2+2)*(4+5)
+
+You can do it iteratively:
+- 2+2 = 4
+- 4+5 = 9
+- 4*9 = 36
+
+Or in parrerel:
+- 2+2 = 4; 4+5=9
+- 4*9 = 36
+
+You can see we saved on one operation.
+We do the same for collectiing the values from int-lenet
+
+We use golang, because it is really is to make it parrrelized using "go" functions.
+- We parrelize calculation of each row (aka predictions for each image in the index)
+    - In each row computation we also pararelize the computation of int-lenet with different values for bit flips (0 to 50)
+
+So, for instance:
+
+- Image 1: [Image 1 with 0 injectsion, Image 1 with 1 injectsion, Image 1 with 2 injectsion] | Image 2: [Image 2 with 0 injectsion, Image 2 with 1 injectsion, Image 2 with 2 injectsion]
+
+The above is just one operation
+
+Then we save the resutls from computations into just text file.
+The format of this text file is kinda stupid because of me.
+
+It is just sequence of numbers: 
+0 (index of the image) results_for_inejectoin_0_for_image_1 results_for_inejectoin_1_for_image_1 results_for_inejectoin_2_for_image_1 ... results_for_inejectoin_49_for_image_1 results_for_inejectoin_50_for_image_1
+1 (index of the image) results_for_inejectoin_0_for_image_2 results_for_inejectoin_1_for_image_2 results_for_inejectoin_2_for_image_2 ... results_for_inejectoin_49_for_image_2 results_for_inejectoin_50_for_image_2
+2 (index of the image) results_for_inejectoin_0_for_image_3 results_for_inejectoin_1_for_image_3 results_for_inejectoin_2_for_image_3 ... results_for_inejectoin_49_for_image_3 results_for_inejectoin_50_for_image_3
+
+The problem there is i didn't seperate the sequence with whitespace or like a comma.
+
+But anyway we now have all the information. 
+We proceed by making python script:
+- Read the same file produced by golang script
+- Preprocess file to get the index from the sequence (we need to do it because i forgot to include the whitespace)
+- For each of the amount of the fault injectsions (0 to 50) we compare the results of predictions for each image with the values (aka labels) from the dataset (which are correct ones)
+    - We calculate amount of correct ones and divide it by total amount ==> accuracy
+- Store accuracy for each amount of fault injections
+- Display it on the graph
+
+
+
+P.S. The things i think we should do:
+- Obviusly the fault injection is most basic one, we should implement inject the bit flips where we exactly need and also in the activations and biasses too; so we could measure the impact of fault injections on each layer
+- Also we should implement choosing the direciton fo the bit flip 0->1 1->0
+- Automate it even further
+- Use more rigid file format for results, e.g. store it as CSV file
+- Move from go to python so it would be easier to understand the code
+- Increase the maximum amount of injections we insert
+- Maybe omit using C compiled model completly (if we can) and just work with python for now (quantize the model but use it in python not in C)
+- Make the randomization more research suitable, i think we should use real random number generator (i think that rand() function from stdlib is just a pseude random number generator)
+- Cleanup the codebase
+- Make it even more automated using CI/CD pipelines? very very very maybe, but gitlab-ci.yaml file tells that professor might wanted to do that anyway
+
+
+
+
+
+
+COMMANDS:
+
+Cleanup:
+make clean 
+
+Install dependencies:
+pip install tensorflow numpy matplotlib 
+
+Train and save the models:
+python lenet.py 
+
+Preprocess models for the int-lenet.c
+python dump-images.py 
+python dump-parameters.py 
+
+Compile the model in c:
+make int-lenet 
+
+Compile golang script:
+go build collect_fi_results.go
+
+Run golang script:
+./collect_fi_results
