@@ -132,6 +132,16 @@ We wrote a Python script to:
 make clean
 ```
 
+**Create python environment (If you need):**
+```
+python3 -m venv .venv
+```
+
+**Enter python environment (If you created one):**
+```
+source .venv/bin/activate
+```
+
 **Install dependencies:**
 ```
 pip install tensorflow numpy matplotlib
