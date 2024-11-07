@@ -247,25 +247,6 @@ void flip_random_bit(void* array, size_t array_size) {
 }
 
 // Function to perform fault injection
-void inject_fault() {
-    // Array of pointers to the weight arrays
-    void* weight_arrays[] = {
-        C1_kernels, C3_kernels, F5_weights, F6_weights, F7_weights
-    };
-    size_t array_sizes[] = {
-        sizeof(C1_kernels), sizeof(C3_kernels), sizeof(F5_weights),
-        sizeof(F6_weights), sizeof(F7_weights)
-    };
-    int num_arrays = sizeof(weight_arrays) / sizeof(weight_arrays[0]);
-
-    // Select a random array
-    int array_index = rand() % num_arrays;
-    
-    // Inject fault in the selected array
-    flip_random_bit(weight_arrays[array_index], array_sizes[array_index]);
-    
-    // printf("Injected fault in array %d\n", array_index);
-}
 
 int run_inference(int t) {
     int8_t c1_in[32][32][1];
@@ -309,33 +290,125 @@ int run_inference(int t) {
     return rank;
 }
 
-int main(int argc, char *argv[])
-{
+#define NUM_TEST_SAMPLES 10000
+
+// Arrays for storing backup of the original weights
+int8_t C1_kernels_backup[sizeof(C1_kernels)];
+int8_t C3_kernels_backup[sizeof(C3_kernels)];
+int8_t F5_weights_backup[sizeof(F5_weights)];
+int8_t F6_weights_backup[sizeof(F6_weights)];
+int8_t F7_weights_backup[sizeof(F7_weights)];
+
+// Structure to hold fault injection details
+typedef struct {
+    int image_id;
+    const char* perturbed_data_type;
+    size_t byte_index;
+    int bit_position;
+    int initial_value;
+    int final_classification;
+} FaultInjectionLog;
+
+// Array to store fault logs and a counter
+FaultInjectionLog fault_logs[NUM_TEST_SAMPLES];
+int fault_log_count = 0;
+
+// Function to initialize backups
+void backup_weights() {
+    memcpy(C1_kernels_backup, C1_kernels, sizeof(C1_kernels));
+    memcpy(C3_kernels_backup, C3_kernels, sizeof(C3_kernels));
+    memcpy(F5_weights_backup, F5_weights, sizeof(F5_weights));
+    memcpy(F6_weights_backup, F6_weights, sizeof(F6_weights));
+    memcpy(F7_weights_backup, F7_weights, sizeof(F7_weights));
+}
+
+// Function to restore weights from backups
+void restore_weights() {
+    memcpy(C1_kernels, C1_kernels_backup, sizeof(C1_kernels));
+    memcpy(C3_kernels, C3_kernels_backup, sizeof(C3_kernels));
+    memcpy(F5_weights, F5_weights_backup, sizeof(F5_weights));
+    memcpy(F6_weights, F6_weights_backup, sizeof(F6_weights));
+    memcpy(F7_weights, F7_weights_backup, sizeof(F7_weights));
+}
+
+// Extended inject_fault function to log details
+void inject_fault(int image_id) {
+    // Array of pointers to the weight arrays and names
+    void* weight_arrays[] = { C1_kernels, C3_kernels, F5_weights, F6_weights, F7_weights };
+    const char* weight_names[] = { "C1_kernels", "C3_kernels", "F5_weights", "F6_weights", "F7_weights" };
+    size_t array_sizes[] = { sizeof(C1_kernels), sizeof(C3_kernels), sizeof(F5_weights), sizeof(F6_weights), sizeof(F7_weights) };
+    int num_arrays = sizeof(weight_arrays) / sizeof(weight_arrays[0]);
+
+    // Select a random array
+    int array_index = rand() % num_arrays;
+    void* selected_array = weight_arrays[array_index];
+    const char* selected_name = weight_names[array_index];
+    size_t selected_size = array_sizes[array_index];
+
+    // Select a random bit to flip
+    size_t byte_index = rand() % selected_size;
+    int bit_position = rand() % 8;
+    unsigned char* byte_ptr = (unsigned char*)selected_array + byte_index;
+    int initial_value = (*byte_ptr >> bit_position) & 1;
+
+    // Flip the bit
+    *byte_ptr ^= (1 << bit_position);
+
+    // Store fault injection details
+    fault_logs[fault_log_count++] = (FaultInjectionLog) {
+        .image_id = image_id,
+        .perturbed_data_type = selected_name,
+        .byte_index = byte_index,
+        .bit_position = bit_position,
+        .initial_value = initial_value
+    };
+}
+
+// Function to save logs to a file
+void save_fault_logs() {
+    FILE* log_file = fopen("fault_injection_log.csv", "w");
+    if (log_file == NULL) {
+        perror("Error opening log file");
+        return;
+    }
+
+    fprintf(log_file, "Image_ID,Perturbed_Data_Type,Byte_Index,Bit_Position,Initial_Value,Final_Classification\n");
+    for (int i = 0; i < fault_log_count; i++) {
+        FaultInjectionLog log = fault_logs[i];
+        fprintf(log_file, "%d,%s,%zu,%d,%d,%d\n",
+                log.image_id, log.perturbed_data_type, log.byte_index,
+                log.bit_position, log.initial_value, log.final_classification);
+    }
+    fclose(log_file);
+}
+
+int main() {
     // Seed the random number generator
     srand(time(NULL));
 
-    // Check if we have the correct number of arguments
-    if (argc != 3) {
-        return -1;
+    // Backup the weights once at the beginning
+    backup_weights();
+
+    // Iterate over the entire test_mnist dataset
+    for (int t = 0; t < NUM_TEST_SAMPLES; t++) {
+        // Run inference without fault injection (clean inference)
+        int clean_result = run_inference(t);
+
+        // Inject a fault and record it
+        inject_fault(t);
+
+        // Run inference with the fault injected
+        int fault_result = run_inference(t);
+
+        // Record the final classification result in the log
+        fault_logs[fault_log_count - 1].final_classification = fault_result;
+
+        // Restore weights to their original state for the next test sample
+        restore_weights();
     }
 
-    // Parse arguments
-    int t = strtol(argv[1], NULL, 0);
-    int num_flips = (argc == 3) ? strtol(argv[2], NULL, 0) : 0;
-
-    // Run inference without fault injection
-    int original_result = run_inference(t);
-
-    // Inject faults if specified
-    if (num_flips > 0) {
-        for (int i = 0; i < num_flips; i++) {
-            inject_fault();
-        }
-        int flipped_result = run_inference(t);
-        printf("%d\n", flipped_result);
-    } else {
-        printf("%d\n", original_result);
-    }
+    // Save fault logs to a file
+    save_fault_logs();
 
     return 0;
 }
